@@ -33,6 +33,42 @@ const ROUTES = [
 // Хосты, ассеты с которых нужно скачивать локально.
 const ASSET_HOSTS = ['framer.website', 'framerusercontent.com', 'framer.com'];
 
+// Реальные страницы сайта (для нормализации внутренних ссылок).
+const SECTIONS = new Set(
+  ROUTES.filter((r) => r !== '/').map((r) => r.replace(/^\/|\/$/g, ''))
+);
+
+// Перехватчик кликов: для внутренних ссылок на реальные страницы форсирует
+// полную перезагрузку (минуя SPA-роутер Framer), чтобы URL и подсветка активной
+// вкладки всегда были корректны. Оверлеи (img_big и т.п.) остаются на Framer.
+const NAV_SCRIPT =
+  '<script id="force-full-nav">' +
+  '(function(){window.addEventListener("click",function(e){' +
+  'if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;' +
+  'var t=e.target;var a=(t&&t.closest)?t.closest("a[data-fullnav]"):null;' +
+  'if(!a||!a.href)return;' +
+  'e.preventDefault();e.stopImmediatePropagation();window.location.assign(a.href);' +
+  '},true);})();' +
+  '</script>';
+
+// Внутренняя ссылка -> 'home' | имя секции | null (не страница: оверлей/ассет/внешняя).
+function normalizeInternal(href) {
+  if (!href) return null;
+  if (href.includes('://') || /^(#|mailto:|tel:|data:|javascript:)/.test(href)) return null;
+  if (href.includes('?') || href.includes('#')) return null;
+  let s = href;
+  while (s.startsWith('../')) s = s.slice(3);
+  if (s.startsWith('./')) s = s.slice(2);
+  s = s.replace(/^\/+/, '').replace(/\/+$/, '');
+  if (s === '') return 'home';
+  return SECTIONS.has(s) ? s : null;
+}
+
+function canonicalHref(target, depth) {
+  const base = depth === 0 ? './' : '../'.repeat(depth);
+  return target === 'home' ? base : base + target + '/';
+}
+
 // Карта: удалённый URL -> локальный относительный путь.
 const assetMap = new Map();
 
@@ -97,9 +133,22 @@ function saveBuffer(localRel, buffer) {
       html = html.split(noQuery).join(rel);
     }
 
-    // Переписываем внутренние ссылки сайта на относительные.
+    // Переписываем абсолютные внутренние ссылки на относительные.
     html = html.split(BASE + '/').join(prefix);
     html = html.split(BASE).join(prefix);
+
+    // Нормализуем ВСЕ внутренние ссылки на реальные страницы к корректным путям
+    // (с учётом глубины) и помечаем их data-fullnav для полной навигации.
+    html = html.replace(/(\s)href="([^"]*)"/g, (m, sp, href) => {
+      const target = normalizeInternal(href);
+      if (target === null) return m;
+      return `${sp}data-fullnav="1" href="${canonicalHref(target, depth)}"`;
+    });
+
+    // Вшиваем перехватчик полной навигации.
+    if (!html.includes('id="force-full-nav"')) {
+      html = html.replace('</head>', NAV_SCRIPT + '</head>');
+    }
 
     // Сохраняем: '/' -> index.html, '/orders' -> orders/index.html и т. д.
     const outRel = route === '/' ? 'index.html'
